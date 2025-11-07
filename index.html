@@ -1,0 +1,111 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Control LED (MQTT)</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      max-width: 480px;
+      margin: auto;
+      padding: 16px;
+      text-align: center;
+    }
+    button {
+      padding: 12px 16px;
+      margin: 8px;
+      font-size: 16px;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    #status {
+      margin-bottom: 12px;
+      font-weight: bold;
+    }
+  </style>
+</head>
+<body>
+  <h2>ESP32 LED por MQTT</h2>
+  <div id="status">Conectando…</div>
+
+  <p>
+    <button id="btnOn">Encender</button>
+    <button id="btnOff">Apagar</button>
+    <button id="btnToggle">Toggle</button>
+  </p>
+
+  <p>Estado del LED: <span id="ledState">?</span></p>
+
+  <!-- Librería Paho MQTT (por CDN) -->
+  <script src="https://unpkg.com/paho-mqtt/mqttws31.min.js"></script>
+  <script>
+    // === Configuración MQTT ===
+    const isHttps = location.protocol === "https:";  // Detecta HTTPS
+    const HOST = "broker.hivemq.com";
+    const PATH = "/mqtt";
+    const PORT = isHttps ? 8884 : 8000;
+    const USE_SSL = isHttps;
+
+    // ⚠️ Cambia estos topics por unos únicos para ti
+    const TOPIC_CMD   = "pedro/esp32/led/cmd";
+    const TOPIC_STATE = "pedro/esp32/led/state";
+
+    const clientId = "webclient-" + Math.random().toString(16).slice(2);
+    const client = new Paho.MQTT.Client(HOST, Number(PORT), PATH, clientId);
+
+    const $ = (id) => document.getElementById(id);
+
+    // === Eventos del cliente MQTT ===
+    client.onConnectionLost = (resp) => {
+      $("status").textContent = "Desconectado: " + (resp.errorMessage || "");
+      $("status").style.color = "red";
+      setTimeout(connect, 2000);
+    };
+
+    client.onMessageArrived = (message) => {
+      if (message.destinationName === TOPIC_STATE) {
+        const payload = message.payloadString.toLowerCase();
+        $("ledState").textContent = payload === "on" ? "ENCENDIDO" : "APAGADO";
+        $("ledState").style.color = payload === "on" ? "green" : "gray";
+      }
+    };
+
+    // === Conexión al broker ===
+    function connect() {
+      $("status").textContent = "Conectando…";
+      $("status").style.color = "orange";
+      client.connect({
+        timeout: 5,
+        useSSL: USE_SSL,
+        mqttVersion: 4,       // MQTT 3.1.1
+        keepAliveInterval: 30,
+        onSuccess: () => {
+          $("status").textContent = "Conectado a HiveMQ";
+          $("status").style.color = "green";
+          client.subscribe(TOPIC_STATE, { qos: 0 });
+        },
+        onFailure: (err) => {
+          $("status").textContent = "Error: " + err.errorMessage;
+          $("status").style.color = "red";
+          setTimeout(connect, 3000);
+        },
+      });
+    }
+
+    // === Publicar comandos ===
+    function publishCmd(cmd) {
+      const msg = new Paho.MQTT.Message(cmd);
+      msg.destinationName = TOPIC_CMD;
+      client.send(msg);
+    }
+
+    $("btnOn").onclick = () => publishCmd("on");
+    $("btnOff").onclick = () => publishCmd("off");
+    $("btnToggle").onclick = () => publishCmd("toggle");
+
+    // === Iniciar conexión ===
+    connect();
+  </script>
+</body>
+</html>
