@@ -13,16 +13,17 @@
     .ok { color:green; }
     .err { color:red; }
     .msg { color:#333; }
+    .warn { color: orange; }
   </style>
 </head>
 <body>
   <h2>ESP32 LED por MQTT</h2>
-  <div id="status">Conectando…</div>
+  <div id="status">Cargando librería MQTT...</div>
 
   <p>
-    <button id="btnOn">Encender</button>
-    <button id="btnOff">Apagar</button>
-    <button id="btnToggle">Toggle</button>
+    <button id="btnOn" disabled>Encender</button>
+    <button id="btnOff" disabled>Apagar</button>
+    <button id="btnToggle" disabled>Toggle</button>
   </p>
 
   <p>Estado del LED: <span id="ledState">?</span></p>
@@ -30,103 +31,252 @@
   <h3>Logs</h3>
   <div id="log"></div>
 
-  <!-- Cargar Paho desde un único CDN (Cloudflare) -->
-  <script src="https://cdn.jsdelivr.net/npm/paho-mqtt@1.1.0/paho-mqtt.min.js"></script>
-
   <script>
     // === Configuración MQTT ===
-    const isHttps = location.protocol === "https:";  // Detecta HTTPS
     const HOST = "broker.hivemq.com";
+    const PORT = 8080;  // WebSocket sin SSL
     const PATH = "/mqtt";
-    const PORT = 8080;
     const USE_SSL = false;
-    
 
     // Topics (coinciden con tu ESP32)
-    const TOPIC_CMD   = "pedro/esp32/led/cmd";          // web -> esp32
-    const TOPIC_STATE = "pedro/esp32/led/state";        // esp32 -> web
-    const TOPIC_AVAIL = "pedro/esp32/led/availability"; // esp32 -> web (online/offline)
+    const TOPIC_CMD   = "pedro/esp32/led/cmd";
+    const TOPIC_STATE = "pedro/esp32/led/state";
+    const TOPIC_AVAIL = "pedro/esp32/led/availability";
+
+    // Variables globales
+    let client = null;
+    let pahoLoaded = false;
 
     // Helpers de UI
     const $ = (id) => document.getElementById(id);
-    const log = (html, cls="msg") => {
+    const log = (html, cls = "msg") => {
       const ts = new Date().toLocaleTimeString();
       $("log").insertAdjacentHTML("afterbegin", `<div class="${cls}"><span class="ts">[${ts}]</span> ${html}</div>`);
     };
 
-    // Verifica que Paho esté cargado
-    if (typeof Paho === "undefined") {
-      $("status").textContent = "Error: Paho no cargó";
-      $("status").className = "err";
-      log("La librería Paho no se cargó. Revisa el CDN o bloqueadores.", "err");
-      throw new Error("Paho no está definido");
+    // Habilitar/deshabilitar botones
+    function setButtonsEnabled(enabled) {
+      $("btnOn").disabled = !enabled;
+      $("btnOff").disabled = !enabled;
+      $("btnToggle").disabled = !enabled;
     }
 
-    // Crear cliente
-    const clientId = "webclient-" + Math.random().toString(16).slice(2);
-    const client = new Paho.MQTT.Client(HOST, Number(PORT), PATH, clientId);
+    // Cargar Paho MQTT con múltiples fallbacks
+    function loadPahoMQTT() {
+      return new Promise((resolve, reject) => {
+        // Si ya está cargado, resolver inmediatamente
+        if (typeof Paho !== 'undefined' && Paho.MQTT && Paho.MQTT.Client) {
+          log("Paho MQTT ya cargado", "ok");
+          resolve();
+          return;
+        }
 
-    // Eventos del cliente
-    client.onConnectionLost = (resp) => {
-      $("status").textContent = "Desconectado: " + (resp.errorMessage || "");
+        const cdns = [
+          'https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.1.0/mqttws31.min.js',
+          'https://unpkg.com/paho-mqtt@1.1.0/paho-mqtt.min.js',
+          'https://cdn.jsdelivr.net/npm/paho-mqtt@1.1.0/paho-mqtt.min.js'
+        ];
+
+        let currentCdn = 0;
+
+        function tryLoad() {
+          if (currentCdn >= cdns.length) {
+            reject(new Error("Todos los CDNs fallaron"));
+            return;
+          }
+
+          const script = document.createElement('script');
+          script.src = cdns[currentCdn];
+          
+          script.onload = () => {
+            // Verificar que Paho se cargó correctamente
+            setTimeout(() => {
+              if (typeof Paho !== 'undefined' && Paho.MQTT && Paho.MQTT.Client) {
+                log(`Paho MQTT cargado desde: ${cdns[currentCdn]}`, "ok");
+                resolve();
+              } else {
+                log(`CDN cargó pero Paho no está definido: ${cdns[currentCdn]}`, "warn");
+                currentCdn++;
+                tryLoad();
+              }
+            }, 100);
+          };
+
+          script.onerror = () => {
+            log(`Error cargando: ${cdns[currentCdn]}`, "warn");
+            currentCdn++;
+            tryLoad();
+          };
+
+          document.head.appendChild(script);
+        }
+
+        tryLoad();
+      });
+    }
+
+    // Inicializar aplicación MQTT
+    function initMQTT() {
+      if (typeof Paho === 'undefined' || !Paho.MQTT || !Paho.MQTT.Client) {
+        log("ERROR: Paho MQTT no disponible después de cargar", "err");
+        return;
+      }
+
+      try {
+        // Crear cliente
+        const clientId = "webclient-" + Math.random().toString(16).slice(2);
+        client = new Paho.MQTT.Client(HOST, Number(PORT), PATH, clientId);
+        
+        log("Cliente MQTT creado correctamente", "ok");
+        pahoLoaded = true;
+        setButtonsEnabled(true);
+
+        // Configurar event handlers
+        client.onConnectionLost = onConnectionLost;
+        client.onMessageArrived = onMessageArrived;
+
+        // Conectar
+        connectMQTT();
+
+      } catch (error) {
+        log(`Error creando cliente MQTT: ${error.message}`, "err");
+      }
+    }
+
+    // Manejar pérdida de conexión
+    function onConnectionLost(response) {
+      $("status").textContent = "Desconectado";
       $("status").className = "err";
-      log("Conexión perdida: " + (resp.errorMessage || "(sin detalle)"), "err");
-      setTimeout(connect, 2000);
-    };
+      log("Conexión perdida: " + (response.errorMessage || "Sin detalles"), "err");
+      setButtonsEnabled(false);
+      
+      // Reconectar después de 3 segundos
+      setTimeout(connectMQTT, 3000);
+    }
 
-    client.onMessageArrived = (message) => {
+    // Manejar mensajes entrantes
+    function onMessageArrived(message) {
       const topic = message.destinationName;
-      const payload = (message.payloadString || "").toLowerCase();
+      const payload = (message.payloadString || "").toLowerCase().trim();
+      
       log(`RX <b>${topic}</b> = <code>${payload}</code>`);
+      
       if (topic === TOPIC_STATE) {
         $("ledState").textContent = payload === "on" ? "ENCENDIDO" : "APAGADO";
         $("ledState").style.color = payload === "on" ? "green" : "gray";
       }
+      
       if (topic === TOPIC_AVAIL) {
-        log(`Disponibilidad: <b>${payload}</b>`);
+        log(`Disponibilidad ESP32: <b>${payload}</b>`);
       }
-    };
+    }
 
-    // Conectarse
-    function connect() {
-      $("status").textContent = "Conectando…";
+    // Conectar al broker MQTT
+    function connectMQTT() {
+      if (!client) {
+        log("Cliente no inicializado", "err");
+        return;
+      }
+
+      $("status").textContent = "Conectando...";
       $("status").className = "";
-      log(`Conectando a ${HOST}:${PORT} ${USE_SSL ? "(wss)" : "(ws)"}`);
-      client.connect({
-        timeout: 5,
+      
+      log(`Conectando a ${HOST}:${PORT} (WebSocket)`);
+
+      const connectOptions = {
+        timeout: 10,
         useSSL: USE_SSL,
-        mqttVersion: 4,       // MQTT 3.1.1
-        keepAliveInterval: 30,
-        onSuccess: () => {
-          $("status").textContent = "Conectado a HiveMQ";
-          $("status").className = "ok";
-          log("Conectado ✅", "ok");
-          client.subscribe(TOPIC_STATE, { qos: 0 });
-          client.subscribe(TOPIC_AVAIL, { qos: 0 });
-          log(`Suscrito a <b>${TOPIC_STATE}</b> y <b>${TOPIC_AVAIL}</b>`);
-        },
-        onFailure: (err) => {
-          $("status").textContent = "Error: " + err.errorMessage;
-          $("status").className = "err";
-          log("Error al conectar: " + err.errorMessage, "err");
-          setTimeout(connect, 3000);
-        },
-      });
+        mqttVersion: 4, // MQTT 3.1.1
+        keepAliveInterval: 60,
+        cleanSession: true,
+        onSuccess: onConnectSuccess,
+        onFailure: onConnectFailure
+      };
+
+      client.connect(connectOptions);
+    }
+
+    function onConnectSuccess() {
+      $("status").textContent = "Conectado a HiveMQ";
+      $("status").className = "ok";
+      log("Conexión MQTT exitosa ✅", "ok");
+      
+      // Suscribirse a topics
+      client.subscribe(TOPIC_STATE, { qos: 0 });
+      client.subscribe(TOPIC_AVAIL, { qos: 0 });
+      log(`Suscrito a: <b>${TOPIC_STATE}</b> y <b>${TOPIC_AVAIL}</b>`);
+      
+      setButtonsEnabled(true);
+    }
+
+    function onConnectFailure(error) {
+      $("status").textContent = "Error de conexión";
+      $("status").className = "err";
+      log(`Error conectando: ${error.errorMessage}`, "err");
+      setButtonsEnabled(false);
+      
+      // Reintentar después de 5 segundos
+      setTimeout(connectMQTT, 5000);
     }
 
     // Publicar comandos
     function publishCmd(cmd) {
-      const msg = new Paho.MQTT.Message(cmd);
-      msg.destinationName = TOPIC_CMD;
-      client.send(msg);
-      log(`TX <b>${TOPIC_CMD}</b> = <code>${cmd}</code>`);
+      if (!client || !client.isConnected()) {
+        log("No conectado. No se puede enviar comando.", "err");
+        return;
+      }
+
+      try {
+        const message = new Paho.MQTT.Message(cmd);
+        message.destinationName = TOPIC_CMD;
+        message.qos = 0;
+        message.retained = false;
+        
+        client.send(message);
+        log(`TX <b>${TOPIC_CMD}</b> = <code>${cmd}</code>`);
+      } catch (error) {
+        log(`Error enviando comando: ${error.message}`, "err");
+      }
     }
 
-    $("btnOn").onclick = () => publishCmd("on");
-    $("btnOff").onclick = () => publishCmd("off");
-    $("btnToggle").onclick = () => publishCmd("toggle");
+    // Configurar event listeners para botones
+    function setupEventListeners() {
+      $("btnOn").onclick = () => publishCmd("on");
+      $("btnOff").onclick = () => publishCmd("off");
+      $("btnToggle").onclick = () => publishCmd("toggle");
+    }
 
-    connect();
+    // Inicializar la aplicación cuando se carga la página
+    window.addEventListener('DOMContentLoaded', async function() {
+      log("Iniciando aplicación...", "msg");
+      setupEventListeners();
+      setButtonsEnabled(false);
+
+      try {
+        await loadPahoMQTT();
+        initMQTT();
+      } catch (error) {
+        log(`Error crítico: ${error.message}`, "err");
+        $("status").textContent = "Error cargando librerías";
+        $("status").className = "err";
+        
+        // Último intento - usar una versión local si está disponible
+        log("Intentando cargar versión local de Paho...", "warn");
+        const localScript = document.createElement('script');
+        localScript.src = 'paho-mqtt.js'; // Archivo local
+        localScript.onload = initMQTT;
+        localScript.onerror = () => log("Versión local tampoco disponible", "err");
+        document.head.appendChild(localScript);
+      }
+    });
+
+    // Manejar reconexión cuando la página gana foco
+    window.addEventListener('focus', function() {
+      if (client && !client.isConnected() && pahoLoaded) {
+        log("Página en foco - reconectando...", "warn");
+        connectMQTT();
+      }
+    });
   </script>
 </body>
 </html>
