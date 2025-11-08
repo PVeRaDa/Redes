@@ -38,8 +38,9 @@
     const isHttps = location.protocol === "https:";  // Detecta HTTPS
     const HOST = "broker.hivemq.com";
     const PATH = "/mqtt";
-    const PORT = isHttps ? 8884 : 8000;
-    const USE_SSL = isHttps;
+    const PORT = 8080;
+    const USE_SSL = false;
+    
 
     // Topics (coinciden con tu ESP32)
     const TOPIC_CMD   = "pedro/esp32/led/cmd";          // web -> esp32
